@@ -1,0 +1,3 @@
+[submodule "dataset"]
+	path = dataset
+	url = https://github.com/mrjbradley4/STAT-760-Smoke-Dataset
