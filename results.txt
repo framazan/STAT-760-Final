@@ -1,0 +1,101 @@
+FIRENET CNN (CUSTOM):
+
+Epoch 037/080 | train loss 0.4011 acc 0.7913 | val loss 0.3553 acc 0.9618 | lr 5.31e-04 | 187s
+Early stopping at epoch 37 (patience=12)
+
+── Loading best checkpoint for test evaluation ──
+  Eval  ep ? | batch    1/22 | loss 0.1397  acc 0.9688
+  Eval  ep ? | batch    5/22 | loss 0.1762  acc 0.9563
+  Eval  ep ? | batch    9/22 | loss 0.1708  acc 0.9618
+  Eval  ep ? | batch   13/22 | loss 0.2383  acc 0.9712
+  Eval  ep ? | batch   17/22 | loss 0.2732  acc 0.9779
+  Eval  ep ? | batch   21/22 | loss 0.3029  acc 0.9747
+  Eval  ep ? | batch   22/22 | loss 0.3039  acc 0.9751
+
+============================================================
+  FINAL TEST  |  loss 0.3039  |  acc 0.9751
+  Best val acc: 0.9642  (epoch 25)
+  Checkpoint: ./checkpoints/firenet_mixup_sd.pt
+============================================================
+
+convnext, raw, no transfer, same result with transfer:
+
+  Train ep 23 | batch  162/162 | loss 0.3227  acc 0.8184
+  Eval  ep 23 | batch    1/40 | loss 0.1127  acc 1.0000
+  Eval  ep 23 | batch    9/40 | loss 0.1573  acc 0.9340
+  Eval  ep 23 | batch   17/40 | loss 0.2337  acc 0.9540
+  Eval  ep 23 | batch   25/40 | loss 0.2799  acc 0.9688
+  Eval  ep 23 | batch   33/40 | loss 0.3018  acc 0.9763
+  Eval  ep 23 | batch   40/40 | loss 0.3127  acc 0.9801
+Epoch 023/080 | train loss 0.3227 acc 0.8184 | val loss 0.3127 acc 0.9801 | lr 8.62e-06 | 311s
+Early stopping at epoch 23 (patience=12)
+
+── Loading best checkpoint for test evaluation ──
+  Eval  ep ? | batch    1/22 | loss 0.1071  acc 1.0000
+  Eval  ep ? | batch    5/22 | loss 0.1079  acc 1.0000
+  Eval  ep ? | batch    9/22 | loss 0.1113  acc 0.9965
+  Eval  ep ? | batch   13/22 | loss 0.1842  acc 0.9976
+  Eval  ep ? | batch   17/22 | loss 0.2282  acc 0.9982
+  Eval  ep ? | batch   21/22 | loss 0.2583  acc 0.9970
+  Eval  ep ? | batch   22/22 | loss 0.2600  acc 0.9971
+
+============================================================
+  FINAL TEST  |  loss 0.2600  |  acc 0.9971
+  Best val acc: 0.9976  (epoch 11)
+  Checkpoint: ./checkpoints/convnext_scratch.pt
+============================================================
+
+vit, transfer:
+Epoch 012/080 | train loss 0.3170 acc 0.8357 | val loss 0.3276 acc 0.9769 | lr 9.78e-06 | 173s
+Early stopping at epoch 12 (patience=5)
+
+── Loading best checkpoint for test evaluation ──
+  Eval  ep ? | batch    1/22 | loss 0.1089  acc 1.0000
+  Eval  ep ? | batch    5/22 | loss 0.1109  acc 1.0000
+  Eval  ep ? | batch    9/22 | loss 0.1135  acc 1.0000
+  Eval  ep ? | batch   13/22 | loss 0.1889  acc 1.0000
+  Eval  ep ? | batch   17/22 | loss 0.2347  acc 0.9982
+  Eval  ep ? | batch   21/22 | loss 0.2666  acc 0.9940
+  Eval  ep ? | batch   22/22 | loss 0.2683  acc 0.9941
+
+============================================================
+  FINAL TEST  |  loss 0.2683  |  acc 0.9941
+  Best val acc: 0.9952  (epoch 7)
+  Checkpoint: ./checkpoints/vit_best.pt
+============================================================
+
+vit, raw:
+Epoch 023/080 | train loss 0.5864 acc 0.5018 | val loss 0.7150 acc 0.5609 | lr 7.96e-04 | 530s
+Early stopping at epoch 23 (patience=12)
+
+── Loading best checkpoint for test evaluation ──
+  Eval  ep ? | batch    1/22 | loss 0.6487  acc 0.5625
+  Eval  ep ? | batch    5/22 | loss 0.6436  acc 0.5687
+  Eval  ep ? | batch    9/22 | loss 0.6548  acc 0.5174
+  Eval  ep ? | batch   13/22 | loss 0.6691  acc 0.5913
+  Eval  ep ? | batch   17/22 | loss 0.6736  acc 0.6379
+  Eval  ep ? | batch   21/22 | loss 0.6776  acc 0.6637
+  Eval  ep ? | batch   22/22 | loss 0.6775  acc 0.6657
+
+============================================================
+  FINAL TEST  |  loss 0.6775  |  acc 0.6657
+  Best val acc: 0.7255  (epoch 11)
+  Checkpoint: ./checkpoints/vit_best.pt
+============================================================
+
+simple cnn:
+Epoch 050/050 | train loss 0.4787 acc 0.7086 | val loss 0.5173 acc 0.8083 | lr 4.95e-03 | 431s
+
+── Loading best checkpoint for test evaluation ──
+  Eval  ep ? | batch    1/22 | loss 0.2686  acc 0.9062
+  Eval  ep ? | batch    5/22 | loss 0.2485  acc 0.9187
+  Eval  ep ? | batch    9/22 | loss 0.2340  acc 0.9375
+  Eval  ep ? | batch   13/22 | loss 0.3081  acc 0.9327
+  Eval  ep ? | batch   17/22 | loss 0.3384  acc 0.9449
+  Eval  ep ? | batch   21/22 | loss 0.3656  acc 0.9420
+  Eval  ep ? | batch   22/22 | loss 0.3663  acc 0.9428
+
+============================================================
+  FINAL TEST  |  loss 0.3663  |  acc 0.9428
+  Best val acc: 0.9252  (epoch 40)
+  Checkpoint: ./checkpoints/simple_best.pt

@@ -1,0 +1,12 @@
+extended-dataset/
+test/
+__pycache__/*
+_minted/*
+test_mixup.py
+cnn_report.aux
+cnn_report.log
+cnn_report.out
+cnn_report.tex
+custom.sty
+checkpoints/
+*.pt

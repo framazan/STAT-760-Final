@@ -1,0 +1,587 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[pdftex]{graphicx}
+\usepackage{amsmath,amssymb,amsthm,pgfplots,float}
+\usepackage{minted}
+\usepackage{custom}
+
+% color boxes
+\usepackage[many]{tcolorbox}
+\tcbuselibrary{theorems}
+\newtcbtheorem{psexample}{Example}{colback=green!10,colframe=green!40!black,fonttitle=\bfseries,breakable,enhanced}{ex}
+\newtcbtheorem{psproblem}{Problem}{colback=blue!10,colframe=blue!40!black,fonttitle=\bfseries,breakable,enhanced}{id}
+\newtcbtheorem{psremark}{Remark}{colback=purple!10,colframe=purple!40!black,fonttitle=\bfseries,breakable,enhanced}{rm}
+\newtcbtheorem{pssolution}{Solution}{colback=orange!10,colframe=orange!40!black,fonttitle=\bfseries,breakable,enhanced}{sn}
+\tcbset{noparskip/.style={before={\par\pagebreak[0]\medskip\parindent=0pt},
+after={\par\medskip}}}
+
+% formatting for problems and solutions
+\definecolor{ptred}{rgb}{0.7,0.1,0.1}
+\newcommand{\ptfmt}[1]{\textbf{\color{ptred}#1\color{black}}}
+\definecolor{advblue}{rgb}{0.1,0.1,0.7}
+\newcommand{\advanced}{\!\textbf{\color{advblue}[A]\color{black}}\ }
+\newcommand{\blue}[1]{\textcolor{blue}{#1}}
+\newcommand{\orange}[1]{\textcolor{orange}{#1}}
+
+\newtheorem*{solution}{Solution}
+\newtheorem*{answer}{Answer}
+
+\makeatletter
+\newtheoremstyle{mystyle}
+{\topsep}               % space above
+{\topsep}               % space below
+{}                      % bodyfont
+{}                      % indent
+{\bfseries}             % headfont
+{}                      % punctuation
+{0.6em}                 % space after head
+{\llap{\hspace{.6em}}\thmname{#1}\thmnumber{ #2}\thmnote{\normalfont{ (#3)}}{\bfseries .}}  %theoremheadspec
+\theoremstyle{mystyle}
+\newtheorem{pproblem}{Problem}
+\makeatother
+
+% clocks for time limits
+\usepackage{clock} 
+% headers and footers
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\pagestyle{fancy}
+\lhead{Filip Ramazan}
+\chead{}
+\rhead{STAT 760}
+\lfoot{}
+\cfoot{\thepage}
+\rfoot{}
+\renewcommand{\headrulewidth}{0.4pt}
+\setlength{\headheight}{14pt}
+
+\newcommand{\psettitle}[1]{
+    \begin{center}
+    \huge \textbf{#1}
+    \end{center}
+}
+
+\linespread{1.03} % give a little extra room
+\setlength{\parindent}{0.2in} % reduce paragraph indent a bit
+
+\usemintedstyle{paraiso-dark}
+\definecolor{bg}{rgb}{0.13,0.13,0.13}
+\definecolor{fg}{rgb}{0.95,0.95,0.95}
+\setmintedinline{bgcolor=bg}
+\DeclareUnicodeCharacter{03BB}{\ensuremath{\lambda}}
+
+\begin{document}
+\psettitle{Midterm}
+\begin{center}
+{\large March $20^{\text{th}}$, 2026}
+\end{center}
+I began my solution by implementing the algorithm given in the instructions. I chose hyperparameters after running a program to test different ones, but I'll detail that at the end. I use a RBF (Gaussian) kernel.
+At first, I chose a multiplicative update. The main issues I found with multiplicative updates were that: 1. multiplicative updates would stall convergence, and most alphas would get near zero, a multiplicative update cannot revive it easily. 
+2. they would need scaling to maintain the constraints, and that would typically mean needing many, many iterations to converge. Also, I tried, but failed, to add things like a learning rate schedule, as the updates became too small too quick.  For additive updates, it was easier to handle with the constraints in this case. I initially tried to compute the violation $\sum{\alpha_i \cdot y_i}$, and if the violation $> 0$ I reduced all positive-class alphas uniformly by the sum divided by the number of points that wouldn't become negative after updating (and vice versa for negative violation).
+I was getting decent results with this method, but it required 6,000,000 iterations. For measuring error, I created a test set of 2000 random data points, and also estimated the area between the known boundary and my model by using the sum of the areas of hundreds of trapezoids. The area estimate helps me quantify the shape/form of the model, and the test set the effectiveness.
+\begin{minted}[
+    bgcolor=bg,
+    fontfamily=tt,
+    fontsize=\small,
+    linenos,
+    breaklines
+]{python}             
+Dual objective               62.9115
+Training accuracy             1.0000
+Support vectors                   25
+Max alpha                    13.4988
+Boundary area error           0.0241
+Test accuracy (n=2000)        0.9745
+\end{minted}
+My method up until now is clearly inefficient. The learning rate is constant (at $\gamma=0.002$), and small. For meaningful changes, I need a learning rate that updates more for the larger violators and smaller for the smaller ones. I would also benefit from a method that updates only the worst alphas, rather than choosing randomly like I was doing up until now, and possibly not a constraint repair system that can slightly move me off the right objective ascent path. To set this up, I shifted to a soft margin SVM too. I noticed that in the results for the first version, some of the randomly generated data was clumped, and the boundary tended toward it there. See here:
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\textwidth]{/Users/filipr/Library/CloudStorage/OneDrive-DavidsonAcademy/STAT 760 - Rojas/svm_stage1.png}
+\end{figure}
+\noindent Soft margin, capping the influence of any single one point, will hopefully generalize better. For this, I derived a formula for the learning rate as a function of the gradients, using the Lagrangian:
+\[
+L(\alpha) = \sum_i \alpha_i - \frac{1}{2} \sum_{i,j} \alpha_i \alpha_j y_i y_j K_{ij}, \quad \sum_i \alpha_i y_i = 0
+\]
+
+\[
+\text{Choose a pair } k,l \text{ with } y_k = 1, y_l = -1, \quad \alpha(\delta) = \alpha + \delta (e_k + e_l)
+\]
+
+\[
+L(\delta) = \sum_i \alpha_i + 2\delta - \frac{1}{2} (\alpha + \delta(e_k+e_l))^\top Q (\alpha + \delta(e_k+e_l))
+\]
+
+\[
+L(\delta) = \sum_i \alpha_i - \frac{1}{2} \alpha^\top Q \alpha + 2\delta - \delta (Q\alpha)\cdot k - \delta (Q\alpha)\cdot l - \frac{1}{2} \delta^2 (Q\cdot {kk} + Q\cdot {ll} - 2Q_{kl})
+\]
+
+\[
+\frac{d L}{d\delta} = 2 - (Q\alpha)\cdot k - (Q\alpha)\cdot l - \delta (Q\cdot {kk}+Q\cdot {ll}+2Q_{kl}) = g_k + g_l - \delta (Q_{kk}+Q_{ll}+2Q_{kl})
+\]
+
+\[
+0 = g_k + g_l - \delta (Q_{kk}+Q_{ll}+2Q_{kl}) \quad \Rightarrow \quad \delta^* = \frac{g_k + g_l}{Q_{kk}+Q_{ll}+2Q_{kl}}
+\]
+\noindent Now, translate this in terms of the kernel.
+\[
+Q_{kk} + Q_{ll} + 2 Q_{kl} = K_{kk} + K_{ll} - 2 K_{kl} \quad \Rightarrow \quad \delta^* = \frac{g_k + g_l}{K_{kk} + K_{ll} - 2 K_{kl}}
+\]
+I used this formula which helps me maximize the change to the Lagrangian with every update to each pair. For picking the pairs, I focus only on the most violating pair for one-half of the updates (odd iterations), and the other half are are chosen at random (even iterations). This way I ensure the $\alpha$s are maximized for the points close to the boundary and the others go to zero. For the soft margin, the clipping to maintain alpha under C is applied when calculating delta. Here are the results from this method:
+ \begin{minted}[
+    bgcolor=bg,
+    fontfamily=tt,
+    fontsize=\small,
+    linenos,
+    breaklines
+]{python}                     
+Dual objective               37.9882
+Training accuracy             1.0000
+Support vectors                   31
+Max alpha                     4.0000
+Bias                          0.0123
+Boundary area error           0.0200
+Test accuracy (n=2000)        0.9805
+\end{minted}
+These results are clearly better, with both boundary and test accuracy improving. There was a modest increase in support vectors. The main problem I see with this implementation, though, is that the Lagrangian improves only by hundredths after the first 10,000 iterations. To fix this, I think I should focus on choosing the pair with the maximum gain in Lagrangian, rather than focusing on the pair that each have the largest absolute gradients. To do this, I derived a formula:
+\[
+L(\alpha)=\sum_i \alpha_i-\frac12\sum_{i,j}\alpha_i\alpha_j y_i y_j K_{ij}
+\]
+
+\[
+\alpha_k'=\alpha_k+\delta,\qquad \alpha_l'=\alpha_l+\delta
+\]
+
+\[
+L(\delta)=L(\alpha)+\delta(g_k+g_l)-\frac12\delta^2(K_{kk}+K_{ll}-2K_{kl})
+\]
+
+\[
+g_i=1-y_i\sum_j \alpha_j y_j K_{ji}
+\]
+
+\[
+\frac{dL}{d\delta}=g_k+g_l-(K_{kk}+K_{ll}-2K_{kl})\delta
+\]
+
+\[
+0=g_k+g_l-(K_{kk}+K_{ll}-2K_{kl})\delta^*
+\]
+
+\[
+\delta^*=\frac{g_k+g_l}{K_{kk}+K_{ll}-2K_{kl}}
+\]
+\[
+\begin{aligned}
+\Delta L &= L(\delta^*)-L(0)=\delta^*(g_k+g_l)-\frac12(K_{kk}+K_{ll}-2K_{kl})(\delta^*)^2 \\
+&= \frac{g_k+g_l}{K_{kk}+K_{ll}-2K_{kl}}(g_k+g_l)
+ - \frac12 (K_{kk}+K_{ll}-2K_{kl})
+ \left(\frac{g_k+g_l}{K_{kk}+K_{ll}-2K_{kl}}\right)^2 \\
+&= \frac{(g_k+g_l)^2}{K_{kk}+K_{ll}-2K_{kl}}
+ - \frac12 \frac{(g_k+g_l)^2}{K_{kk}+K_{ll}-2K_{kl}} = \frac{(g_k+g_l)^2}{2\bigl(K_{kk}+K_{ll}-2K_{kl}\bigr)}
+\end{aligned}
+\]
+\noindent Now, I used this formula in my code, I extracted the top 15 points, with the highest gradients for positive and negative. I compute the expected gain for each, and then choose the best pair. The even iterations remained random points. My final results were marginally better on the test set:
+ \begin{minted}[
+    bgcolor=bg,
+    fontfamily=tt,
+    fontsize=\small,
+    linenos,
+    breaklines
+]{python}
+Dual objective               33.9284
+Training accuracy             1.0000
+Support vectors                   33
+Max alpha                     3.0000
+Bias                          0.0107
+Boundary area error           0.0202
+Test accuracy (n=2000)        0.9825
+\end{minted}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\textwidth]{/Users/filipr/Library/CloudStorage/OneDrive-DavidsonAcademy/STAT 760 - Rojas/svm_stage3.png}
+\end{figure}
+As I didn't have a larger improvement, I stopped trying new methods. Code is shown below for the last method I tried, and it has in it a loop that tests various combinations of hyperparameters. As for possible other improvements or directions I could taken, I could've:
+\begin{itemize}
+\item Temporarily removed points that couldn't become support vectors, like those whose $\alpha_i$ have been pinned at 0 or C for many consecutive iterations, which are unlikely to change. 
+\item I could make it quite faster by using broadcasting for my kernel matrix computation.
+\item The working set size $Z=15$ was fixed. An adaptive Z that grows when gains are small and shrinks when they're large could balance exploration and exploitation better, especially in the later iterations where the Lagrangian improves only by hundredths.
+\item  The values of $\gamma$, $C$, and $Z$ were chosen by running a grid search on test accuracy alone. $k$-fold cross-validation on the training set would give a less biased estimate of generalization, and might have suggested different hyperparameters.
+\end{itemize}
+ \begin{minted}[
+    bgcolor=bg,
+    fontfamily=tt,
+    fontsize=\small,
+    linenos,
+    breaklines
+]{python}
+import numpy as np
+from svm_utils import (
+    generate_data, kernel_matrix, init_alphas,
+    dual_objective, compute_bias, training_accuracy,
+    test_accuracy, boundary_area_error, plot_results,
+)
+gamma    = 0.8 # kernel width
+n_points = 150 # training set size
+C_svm    = 3.0 # soft margin upper bound on alphas
+max_iter = 1_000_000 # number of pairwise iterations
+Z        = 15 # working-set size per class
+
+def optimize_v3(x, y, K, Q, max_iter, Z=5, C_svm=10.0):
+    alpha = init_alphas(y)
+    history = []
+    pos_idx = np.where(y == 1)[0] # indices of positive-class points
+    neg_idx = np.where(y == -1)[0] # indices of negative-class points
+
+    for t in range(1, max_iter + 1):
+        # compute all classifications and gradients at once
+        C_all = (alpha * y) @ K
+        grad_all = 1.0 - y * C_all
+
+        if t % 2 == 1:
+            # odd iterations: pick the pair with largest gain in Lagrangian from working set
+            pos_grads = grad_all[pos_idx]
+            neg_grads = grad_all[neg_idx]
+            # get working set of Z points with largest gradients
+            top_pos = pos_idx[np.argsort(pos_grads)[-Z:]]
+            top_neg = neg_idx[np.argsort(neg_grads)[-Z:]]
+            best_gain = -1.0
+            best_pair = (top_pos[-1], top_neg[-1])
+            # iterate through all pairs in working set
+            for i in top_pos:
+                for j in top_neg:
+                    denominator = K[i, i] + K[j, j] - 2.0 * K[i, j]
+                    if denominator > 1e-12:
+                        predicted_gain = (grad_all[i] + grad_all[j])**2 / (2.0 * denominator)
+                        if predicted_gain > best_gain:
+                            best_gain = predicted_gain
+                            best_pair = (i, j)
+            k, l = best_pair
+        else:
+            # EVEN: pick a random pair (ensures all points get visited)
+            k = pos_idx[np.random.randint(len(pos_idx))]
+            l = neg_idx[np.random.randint(len(neg_idx))]
+
+        # optimal delta:
+        # by plugging alpha_k += delta, alpha_l += delta into the
+        # dual Lagrangian and setting dL/d(delta) = 0, we get:
+        # delta = (grad_k + grad_l) / (K_kk + K_ll - 2*K_kl)
+        # this takes the analytically optimal step for this pair
+        optimal_lr = K[k, k] + K[l, l] - 2.0 * K[k, l]
+        if optimal_lr < 1e-12:
+            continue
+        delta = (grad_all[k] + grad_all[l]) / optimal_lr
+        # clip delta so both alphas stay in [0, C_svm]
+        if delta > 0:
+            delta = min(delta, C_svm - alpha[k], C_svm - alpha[l])
+        else:
+            delta = max(delta, -alpha[k], -alpha[l])
+        if abs(delta) < 1e-12:
+            continue
+        # apply the update
+        alpha[k] += delta
+        alpha[l] += delta
+        # zero out negligible alphas
+        if alpha[k] < 1e-8:
+            alpha[k] = 0.0
+        if alpha[l] < 1e-8:
+            alpha[l] = 0.0
+        # log periodically
+        if t % 1000 == 0:
+            b = compute_bias(alpha, y, K, C_svm)
+            L = dual_objective(alpha, Q)
+            acc = training_accuracy(alpha, y, K, b)
+            n_sv = np.sum(alpha > 1e-4)
+            history.append((t, L, acc, n_sv))
+            print(f"  iter {t:>7d}   L = {L:>10.4f}   acc = {acc:.4f}   SVs = {n_sv}")
+    return alpha, history
+
+if __name__ == '__main__':
+    np.random.seed(16)
+    x, y, _ = generate_data(n_points, seed=16)
+    n = len(y)
+    n_pos = np.sum(y == 1)
+    n_neg = np.sum(y == -1)
+    print(f"Training points:  {n}  (+1: {n_pos}, -1: {n_neg})")
+
+    # define hyperparameter grid
+    param_grid = {
+        'gamma': [0.1, 0.5, 0.8, 1.0],
+        'Z': [5, 10, 15],
+        'C_svm': [1.0, 3.0, 5.0, 10.0]
+    }
+
+    # run grid search
+    best_params, best_alpha, best_bias, best_acc = grid_search(
+        x, y, optimize_v3, param_grid, max_iter=max_iter
+    )
+
+    print("Plotting best model...")
+    best_gamma = best_params.get('gamma', 0.8)
+    plot_results(x, y, best_alpha, best_gamma, bias=best_bias, title=f"Best SVM: {best_params}", filename='svm_v3_best.png')
+
+    bias = compute_bias(best_alpha, y, kernel_matrix(x, best_gamma), best_params.get('C_svm', 10.0))
+    acc = training_accuracy(best_alpha, y, kernel_matrix(x, best_gamma), bias=bias)
+    Q = (y[:, None] * y[None, :]) * kernel_matrix(x, best_gamma)
+    lagrangian = dual_objective(best_alpha, Q)
+    sv = np.sum(best_alpha > 1e-4)
+
+    print(f"\n{'Best Model Results':^60}")
+    print(f"{'-' * 60}")
+    print(f"{'Parameters':<25} {str(best_params)}")
+    print(f"{'Dual objective':<25} {lagrangian:>10.4f}")
+    print(f"{'Training accuracy':<25} {acc:>10.4f}")
+    print(f"{'Support vectors':<25} {sv:>10d}")
+    print(f"{'Max alpha':<25} {np.max(best_alpha):>10.4f}")
+    print(f"{'Bias':<25} {bias:>10.4f}")
+    area = boundary_area_error(x, y, best_alpha, best_gamma, bias=bias)
+    print(f"{'Boundary area error':<25} {area/25:>10.4f}")
+    tacc = test_accuracy(x, y, best_alpha, best_gamma, bias=bias)
+    print(f"{'Test accuracy (n=2000)':<25} {tacc:>10.4f}")
+    print(f"{'-' * 60}")
+ \end{minted}
+For each of my versions, I used these "util" functions:
+ \begin{minted}[
+    bgcolor=bg,
+    fontfamily=tt,
+    fontsize=\small,
+    linenos,
+    breaklines
+]{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(xi, xj, gamma):
+    # K(xi, xj) = exp(-gamma * ||xi - xj||^2)
+    diff = xi - xj
+    return np.exp(-gamma * np.dot(diff, diff))
+
+def kernel_matrix(x, gamma):
+    # precompute full n x n kernel table
+    n = x.shape[0]
+    K = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i, n):
+            K[i, j] = rbf_kernel(x[i], x[j], gamma)
+            K[j, i] = K[i, j]
+    return K
+
+def generate_data(n_points, seed=16):
+    # +1 lies below sin(x) + 2.5
+    # -1 lies above sin(x) + 2.5
+    np.random.seed(seed)
+    x = np.random.uniform(0, 5, size=(n_points, 2))
+    boundary = np.sin(2 * np.pi * x[:, 0] / 5.0) + 2.5
+    y = np.where(x[:, 1] < boundary, 1.0, -1.0)
+    return x, y, boundary
+
+def classify(alpha, y, K_col):
+    # C(x) = sum_i alpha_i * y_i * K(x_i, x)
+    # K_col is the column of the kernel matrix for the query point
+    return np.sum(alpha * y * K_col)
+
+def init_alphas(y):
+    # start with small random positive alphas
+    n = len(y)
+    alpha = np.random.uniform(0.001, 0.01, size=n)
+    # enforce sum(alpha_i * y_i) = 0 by adjusting each class
+    # so that total positive-class alpha equals total negative-class alpha
+    pos = (y == 1)
+    neg = (y == -1)
+    sum_pos = np.sum(alpha[pos])
+    sum_neg = np.sum(alpha[neg])
+    # scale the larger side down to match the smaller
+    if sum_pos > sum_neg:
+        alpha[pos] *= sum_neg / sum_pos
+    else:
+        alpha[neg] *= sum_pos / sum_neg
+    return alpha
+
+
+def repair_constraint(alpha, y, tol=1e-12):
+    violation = np.sum(alpha * y)
+    if abs(violation) < tol:
+        return alpha
+    # determine which class to reduce
+    if violation > 0:
+        mask = (y == 1)
+    else:
+        mask = (y == -1)
+    remaining = mask.copy()
+    while True:
+        idx = np.where(remaining)[0]
+        if len(idx) == 0:
+            break
+        adjustment = abs(violation) / len(idx)
+        alpha[idx] -= adjustment
+        # detect which ones went negative
+        neg = alpha[idx] < 0
+        if not np.any(neg):
+            break
+        # clip them
+        alpha[idx[neg]] = 0.0
+        # remove them from redistribution pool
+        remaining[idx[neg]] = False
+        # recompute violation after clipping
+        violation = np.sum(alpha * y)
+        if abs(violation) < tol:
+            break
+    return alpha
+
+def dual_objective(alpha, Q):
+    # L(alpha) = sum(alpha) - 0.5 * alpha^T Q alpha
+    return np.sum(alpha) - 0.5 * alpha @ Q @ alpha
+
+def compute_bias(alpha, y, K, C_svm):
+    # bias is computed from "free" support vectors: 0 < alpha_k < C
+    # for these points, y_k * (C(x_k) + b) = 1
+    # so b = y_k - C(x_k)
+    tol = 1e-4
+    free_sv = np.where((alpha > tol) & (alpha < C_svm - tol))[0]
+    if len(free_sv) == 0:
+        # fallback: use all support vectors
+        free_sv = np.where(alpha > tol)[0]
+    if len(free_sv) == 0:
+        return 0.0
+    # b = average of (y_k - C(x_k)) over free SVs
+    b_values = []
+    for k in free_sv:
+        C_k = classify(alpha, y, K[k, :])
+        b_values.append(y[k] - C_k)
+    return np.mean(b_values)
+
+def training_accuracy(alpha, y, K, bias=0.0):
+    n = len(y)
+    correct = 0
+    for i in range(n):
+        C_i = classify(alpha, y, K[i, :]) + bias
+        pred = np.sign(C_i)
+        if pred == 0:
+            pred = 1.0
+        if pred == y[i]:
+            correct += 1
+    return correct / n
+
+def test_accuracy(x_train, y_train, alpha, gamma, bias=0.0,
+                  n_test=2000, test_seed=999):
+    # generate a fresh test set and evaluate the model on it
+    x_test, y_test, _ = generate_data(n_test, seed=test_seed)
+    # compute kernel between training points and test points
+    # K_test[i, j] = K(x_train[i], x_test[j])
+    diff = x_train[:, np.newaxis, :] - x_test[np.newaxis, :, :]
+    sq_dist = np.sum(diff ** 2, axis=2)
+    K_test = np.exp(-gamma * sq_dist)
+    # f(x_test_j) = sum_i alpha_i y_i K(x_train_i, x_test_j) + bias
+    f_test = (alpha * y_train) @ K_test + bias
+    preds = np.sign(f_test)
+    preds[preds == 0] = 1.0
+    return np.mean(preds == y_test)
+
+def boundary_area_error(x, y, alpha, gamma, bias=0.0, n_grid=1000):
+    # compute area between SVM decision boundary and true sine curve
+    # by finding f(x1, x2) = 0 for each x1 and comparing to sin boundary
+    x1_vals = np.linspace(0, 5, n_grid)
+    x2_fine = np.linspace(0, 5, n_grid)
+    svm_boundary = np.full(n_grid, np.nan)
+    for i, x1 in enumerate(x1_vals):
+        # evaluate f at all x2 values for this x1
+        pts = np.column_stack([np.full(n_grid, x1), x2_fine])
+        diff = x[:, np.newaxis, :] - pts[np.newaxis, :, :]    # (n, n_grid, 2)
+        sq_dist = np.sum(diff ** 2, axis=2)
+        K_pts = np.exp(-gamma * sq_dist)
+        f_vals = (alpha * y) @ K_pts + bias
+        # find zero crossing (sign change)
+        for j in range(n_grid - 1):
+            if f_vals[j] * f_vals[j + 1] <= 0:
+                # linear interpolation to find the zero
+                t = f_vals[j] / (f_vals[j] - f_vals[j + 1])
+                svm_boundary[i] = x2_fine[j] + t * (x2_fine[j + 1] - x2_fine[j])
+                break
+    # true boundary
+    true_boundary = np.sin(2 * np.pi * x1_vals / 5.0) + 2.5
+    # only use points where we found the SVM boundary
+    valid = ~np.isnan(svm_boundary)
+    if np.sum(valid) < 2:
+        return float('inf')
+    # area = approximate integral of |svm - true| over [0, 5]
+    area = np.trapezoid(np.abs(svm_boundary[valid] - true_boundary[valid]),
+                        x1_vals[valid])
+    return area
+
+def plot_results(x, y, alpha, gamma, bias=0.0,
+                 title='Kernel SVM',
+                 filename='svm_result.png'):
+    _, ax = plt.subplots(figsize=(8, 6))
+    # scatter training points
+    pos = (y == 1)
+    neg = (y == -1)
+    ax.scatter(x[pos, 0], x[pos, 1], c='blue', marker='o', s=20, label='+1')
+    ax.scatter(x[neg, 0], x[neg, 1], c='red',  marker='x', s=20, label='-1')
+    # circle support vectors (alpha > 0.5)
+    sv = np.where(alpha > 0.5)[0]
+    if len(sv) > 0:
+        ax.scatter(x[sv, 0], x[sv, 1], facecolors='none', edgecolors='black',
+                   s=120, linewidths=1.5, label=f'SV (alpha > 0.5, n={len(sv)})')
+    # decision boundary, margins on a grid
+    xx, yy = np.meshgrid(np.linspace(0, 5, 300), np.linspace(0, 5, 300))
+    grid = np.c_[xx.ravel(), yy.ravel()]
+    # compute f(x) = C(x) + bias for each grid point
+    diff = x[:, np.newaxis, :] - grid[np.newaxis, :, :]
+    sq_dist = np.sum(diff ** 2, axis=2)
+    K_grid = np.exp(-gamma * sq_dist)
+    f_grid = (alpha * y) @ K_grid + bias
+    f_grid = f_grid.reshape(xx.shape)
+    # decision boundary (f = 0) and margins (f = +-1)
+    ax.contour(xx, yy, f_grid, levels=[-1], colors='gray', linestyles='--', linewidths=0.8)
+    ax.contour(xx, yy, f_grid, levels=[0],  colors='black', linewidths=1.5)
+    ax.contour(xx, yy, f_grid, levels=[1],  colors='gray', linestyles='--', linewidths=0.8)
+    # true sine boundary
+    xs = np.linspace(0, 5, 300)
+    ax.plot(xs, np.sin(2 * np.pi * xs / 5.0) + 2.5, 'g-', linewidth=1.5, label='true boundary')
+    ax.set_xlim(0, 5)
+    ax.set_ylim(0, 5)
+    ax.set_xlabel('x_1')
+    ax.set_ylabel('x_2')
+    ax.set_title(title)
+    ax.legend(loc='upper right', fontsize=8)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150)
+    plt.show()
+    print(f"Plot saved to {filename}")
+
+def grid_search(x, y, optimize_fn, param_grid, max_iter):
+    keys = list(param_grid.keys())
+    values = param_grid.values()
+    combinations = list(itertools.product(*values))
+    best_params = None
+    best_alpha = None
+    best_acc = -1.0
+    best_bias = 0.0
+    print(f"{'Grid Search':^60}")
+    print("="*60)
+    
+    for combo in combinations:
+        params = dict(zip(keys, combo))
+        gamma = params.get('gamma', 0.8)
+        Z = params.get('Z', 5)
+        C_svm = params.get('C_svm', 10.0)
+        
+        K = kernel_matrix(x, gamma)
+        Q = (y[:, None] * y[None, :]) * K
+        
+        print(f"Testing parameters: {params}...")
+        alpha, history = optimize_fn(x, y, K, Q, max_iter=max_iter, Z=Z, C_svm=C_svm)
+        bias = compute_bias(alpha, y, K, C_svm)
+        acc = test_accuracy(x, y, alpha, gamma, bias=bias)
+        print(f"Result for {params}: Test Acc = {acc:.4f}")
+        print("-" * 60)
+        if acc > best_acc:
+            best_acc = acc
+            best_params = params
+            best_alpha = alpha
+            best_bias = bias
+    print("="*60)
+    print(f"Best parameters: {best_params} with test acc: {best_acc:.4f}")
+    
+    return best_params, best_alpha, best_bias, best_acc
+\end{minted}
+\end{document}

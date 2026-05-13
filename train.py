@@ -1,425 +1,284 @@
+"""
+train.py — Unified training script for all wildfire detection models.
+
+Usage examples:
+    # Train FireNet (custom CNN) — default
+    python train.py --model firenet
+
+    # Train SimpleCNN baseline
+    python train.py --model simple --epochs 16 --lr 5e-3
+
+    # Fine-tune ConvNeXt-Tiny
+    python train.py --model convnext --transfer
+
+    # Fine-tune ViT-Base (pretrained)
+    python train.py --model vit --transfer
+"""
+
 import argparse
 import os
-import random
-from dataclasses import dataclass
-from pathlib import Path
+import time
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
-from torch.utils.data import DataLoader
-from torchvision.datasets.folder import IMG_EXTENSIONS, pil_loader
 from torchvision.transforms import v2
 
-from models import SimpleCNN
+import config as C
+from data import get_dataloaders, compute_class_weights
+from models import build_model
+from utils import get_device, set_seed, Metrics, log
 
 
-SEED = 16
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def seed_worker(worker_id: int) -> None:
-    worker_seed = (torch.initial_seed() + worker_id) % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-@dataclass(frozen=True)
-class Metrics:
-    loss: float
-    acc: float
-
-
-class ImagePathDataset(torch.utils.data.Dataset):
-    def __init__(self, image_paths: list[Path], transform) -> None:
-        self.image_paths = image_paths
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.image_paths)
-
-    def __getitem__(self, index: int):
-        path = self.image_paths[index]
-        image = pil_loader(str(path))
-        return self.transform(image), str(path)
-
+# ── Training / evaluation loop ──────────────────────────────────────────
 
 def run_epoch(
     model: nn.Module,
-    loader: DataLoader,
+    loader,
     criterion: nn.Module,
     optimizer: optim.Optimizer | None,
     device: torch.device,
     epoch: int | None = None,
+    grad_clip: float = 0.0,
+    scheduler=None,
+    mixup_fn=None,
 ) -> Metrics:
+    """Run one epoch of training or evaluation."""
     is_train = optimizer is not None
     model.train(is_train)
+
     total_loss = 0.0
     total_correct = 0
     total_count = 0
-    total_batches = len(loader) if hasattr(loader, "__len__") else None
-    freq = max(1, (total_batches // 10) if total_batches else 10)
-    phase = "Train" if is_train else "Eval"
-    if epoch is not None:
-        print(f"{phase} epoch {epoch} started ({'training' if is_train else 'evaluating'})")
-    for batch_idx, (images, targets) in enumerate(loader):
+    n_batches = len(loader)
+    freq = max(1, n_batches // 5)
+    phase = "Train" if is_train else "Eval "
+
+    for i, (images, targets) in enumerate(loader):
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-        if is_train:
-            optimizer.zero_grad(set_to_none=True)
+
+        if is_train and mixup_fn is not None:
+            images, mix_targets = mixup_fn(images, targets)
+        else:
+            mix_targets = targets
+
         with torch.set_grad_enabled(is_train):
             logits = model(images)
-            loss = criterion(logits, targets)
-            if is_train:
-                loss.backward()
-                optimizer.step()
-        batch_size = targets.size(0)
-        total_loss += loss.item() * batch_size
-        total_correct += (logits.argmax(dim=1) == targets).sum().item()
-        total_count += batch_size
+            loss = criterion(logits, mix_targets)
 
-        if (batch_idx % freq == 0) or (batch_idx == total_batches - 1 if total_batches else False):
-            running_loss = total_loss / max(total_count, 1)
-            running_acc = total_correct / max(total_count, 1)
-            if total_batches:
-                print(
-                    f"{phase} epoch {epoch or '?'} | batch {batch_idx+1}/{total_batches} "
-                    f"running loss {running_loss:.4f} acc {running_acc:.4f}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"{phase} epoch {epoch or '?'} | batch {batch_idx+1} "
-                    f"running loss {running_loss:.4f} acc {running_acc:.4f}",
-                    flush=True,
-                )
+        if is_train:
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            if grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
-    return Metrics(loss=total_loss / max(total_count, 1), acc=total_correct / max(total_count, 1))
+        bs = targets.size(0)
+        total_loss += loss.item() * bs
+        # Compute accuracy using the original targets
+        total_correct += (logits.argmax(1) == targets).sum().item()
+        total_count += bs
 
+        if i % freq == 0 or i == n_batches - 1:
+            rl = total_loss / total_count
+            ra = total_correct / total_count
+            log(f"  {phase} ep {epoch or '?'} | batch {i+1:>4}/{n_batches} | "
+                f"loss {rl:.4f}  acc {ra:.4f}")
 
-def list_image_paths(path: str) -> list[Path]:
-    input_path = Path(path).expanduser()
-    if input_path.is_file():
-        if input_path.suffix.lower() not in IMG_EXTENSIONS:
-            raise ValueError(f"Unsupported image file extension: {input_path}")
-        return [input_path]
-    if input_path.is_dir():
-        image_paths = [
-            candidate
-            for candidate in sorted(input_path.rglob("*"))
-            if candidate.is_file() and candidate.suffix.lower() in IMG_EXTENSIONS
-        ]
-        if not image_paths:
-            raise ValueError(f"No supported image files found in directory: {input_path}")
-        return image_paths
-    raise FileNotFoundError(f"Image path does not exist: {input_path}")
+    if scheduler is not None and is_train:
+        scheduler.step()
+
+    return Metrics(loss=total_loss / total_count,
+                   acc=total_correct / total_count)
 
 
-def build_transforms(image_size: int, mean: list[float], std: list[float]):
-    train_tf = v2.Compose(
-        [
-            v2.ToImage(),
-            v2.RandomResizedCrop(size=(image_size, image_size), scale=(0.75, 1.0)),
-            v2.RandomHorizontalFlip(p=0.5),
-            v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=mean, std=std),
-        ]
-    )
-    eval_tf = v2.Compose(
-        [
-            v2.ToImage(),
-            v2.Resize(size=(image_size + 32, image_size + 32)),
-            v2.CenterCrop(size=(image_size, image_size)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=mean, std=std),
-        ]
-    )
-    return train_tf, eval_tf
+# ── Transfer-learning helpers ────────────────────────────────────────────
+
+def freeze_backbone(model: nn.Module):
+    """Freeze all parameters, then unfreeze the classifier head."""
+    for p in model.parameters():
+        p.requires_grad = False
+    # timm models expose .get_classifier() or .head / .classifier
+    head = None
+    if hasattr(model, "get_classifier"):
+        head = model.get_classifier()
+    elif hasattr(model, "head"):
+        head = model.head
+    elif hasattr(model, "classifier"):
+        head = model.classifier
+    if head is not None:
+        for p in head.parameters():
+            p.requires_grad = True
 
 
-def compute_train_mean_std(
-    train_dir: str,
-    image_size: int,
-    batch_size: int,
-    workers: int,
-    seed: int,
-) -> tuple[list[float], list[float]]:
-    base_tf = v2.Compose(
-        [
-            v2.ToImage(),
-            v2.Resize(size=(image_size + 32, image_size + 32)),
-            v2.CenterCrop(size=(image_size, image_size)),
-            v2.ToDtype(torch.float32, scale=True),
-        ]
-    )
-    ds = torchvision.datasets.ImageFolder(train_dir, transform=base_tf)
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-    loader = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-        worker_init_fn=seed_worker,
-        generator=generator,
-        persistent_workers=False,
-    )
-
-    channel_sum = torch.zeros(3, dtype=torch.float64)
-    channel_sumsq = torch.zeros(3, dtype=torch.float64)
-    total_pixels = 0
-
-    total_batches = len(loader) if hasattr(loader, "__len__") else None
-    freq = max(1, (total_batches // 10) if total_batches else 10)
-    with torch.inference_mode():
-        for batch_idx, (images, _) in enumerate(loader):
-            if images.shape[1] != 3:
-                raise ValueError(f"Expected 3-channel images, got shape {tuple(images.shape)}")
-
-            images = images.contiguous()
-            b, c, h, w = images.shape
-            pixels = b * h * w
-            channel_sum += images.sum(dim=(0, 2, 3), dtype=torch.float64)
-            channel_sumsq += images.square().sum(dim=(0, 2, 3), dtype=torch.float64)
-            total_pixels += pixels
-            if (batch_idx % freq == 0) or (batch_idx == total_batches - 1 if total_batches else False):
-                processed = batch_idx + 1
-                if total_batches:
-                    print(f"Computing mean/std: processed {processed}/{total_batches} batches", flush=True)
-                else:
-                    print(f"Computing mean/std: processed {processed} batches", flush=True)
-
-    mean = channel_sum / max(total_pixels, 1)
-    var = channel_sumsq / max(total_pixels, 1) - mean * mean
-    std = torch.sqrt(torch.clamp(var, min=1e-12))
-
-    mean_list = [float(x) for x in mean]
-    std_list = [float(x) for x in std]
-    return mean_list, std_list
+def unfreeze_all(model: nn.Module):
+    for p in model.parameters():
+        p.requires_grad = True
 
 
-def predict_images(
-    image_path: str,
-    checkpoint_path: str,
-    batch_size: int,
-    workers: int,
-    device: torch.device,
-    fallback_image_size: int,
-    fallback_mean: list[float],
-    fallback_std: list[float],
-    dropout: float,
-) -> None:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    classes = checkpoint.get("classes")
-    if not classes:
-        raise ValueError(f"Checkpoint does not contain class names: {checkpoint_path}")
+# ── Main ─────────────────────────────────────────────────────────────────
 
-    image_size = int(checkpoint.get("image_size", fallback_image_size))
-    mean = checkpoint.get("mean", fallback_mean)
-    std = checkpoint.get("std", fallback_std)
-    _, eval_tf = build_transforms(image_size, mean=mean, std=std)
-
-    image_paths = list_image_paths(image_path)
-    dataset = ImagePathDataset(image_paths, transform=eval_tf)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=workers,
-        persistent_workers=False,
-    )
-
-    model = SimpleCNN(num_classes=len(classes), dropout=dropout)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.to(device)
-    model.eval()
-
-    print(f"Using checkpoint: {checkpoint_path}")
-    print(f"Using device: {device}")
-    print(f"Images: {len(dataset)}")
-    with torch.inference_mode():
-        for images, paths in loader:
-            images = images.to(device)
-            logits = model(images)
-            probabilities = torch.softmax(logits, dim=1).cpu()
-            confidences, indices = probabilities.max(dim=1)
-            for path, confidence, index, probs in zip(paths, confidences, indices, probabilities):
-                class_name = classes[int(index)]
-                prob_text = ", ".join(
-                    f"{classes[class_idx]}={float(prob):.4f}" for class_idx, prob in enumerate(probs)
-                )
-                print(f"{path}\t{class_name}\tconfidence={float(confidence):.4f}\t{prob_text}")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--data_root",
-        type=str,
-        default="./dataset/combined_smoke_fire_classification_256_balanced",
-    )
-    parser.add_argument("--stats", choices=["imagenet", "dataset"], default="imagenet")
-    parser.add_argument("--epochs", type=int, default=16)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=5e-3)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument(
-        "--stats_workers",
-        type=int,
-        default=0,
-        help="DataLoader workers for dataset mean/std calculation. Default 0 avoids macOS worker shutdown hangs.",
-    )
-    parser.add_argument("--image_size", type=int, default=224)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--save_path", type=str, default="./cnn_best.pt")
-    parser.add_argument(
-        "--predict",
-        type=str,
-        default=None,
-        help="Image file or directory to classify with a saved checkpoint. If set, training is skipped.",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-        help="Checkpoint path for --predict. Defaults to --save_path.",
-    )
+def main():
+    parser = argparse.ArgumentParser(description="Wildfire Detection Training")
+    parser.add_argument("--model", type=str, default="firenet",
+                        choices=["simple", "firenet", "convnext", "vit"])
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=C.BATCH_SIZE)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--weight_decay", type=float, default=None)
+    parser.add_argument("--dropout", type=float, default=C.DROPOUT)
+    parser.add_argument("--patience", type=int, default=C.PATIENCE)
+    parser.add_argument("--transfer", action="store_true",
+                        help="Use progressive unfreezing for timm models")
+    parser.add_argument("--enable_mixup", dest="enable_mixup", action="store_true",
+                        help="Enable MixUp/CutMix during training")
+    parser.add_argument("--disable_mixup", dest="enable_mixup", action="store_false",
+                        help="Disable MixUp/CutMix during training")
+    parser.set_defaults(enable_mixup=C.ENABLE_MIXUP)
+    parser.add_argument("--data_root", type=str, default=C.DATA_ROOT)
+    parser.add_argument("--workers", type=int, default=C.NUM_WORKERS)
+    parser.add_argument("--no_class_weights", action="store_true")
+    parser.add_argument("--save_name", type=str, default=None,
+                        help="Override checkpoint filename (saved in checkpoints/)")
     args = parser.parse_args()
 
-    set_seed(SEED)
+    # ── Resolve defaults per model type ──────────────────────────────
+    is_transfer    = args.transfer and args.model in ("convnext", "vit")
+
+    epochs = args.epochs or (C.TL_EPOCHS if is_transfer else C.EPOCHS)
+    lr = args.lr or (C.TL_LR_HEAD if is_transfer else C.LR)
+    wd = args.weight_decay or C.WEIGHT_DECAY
+
+    save_name = args.save_name or f"{args.model}_best.pt"
+    save_path = os.path.join(C.SAVE_DIR, save_name)
+
+    # ── Setup ────────────────────────────────────────────────────────
+    set_seed(C.SEED)
     device = get_device()
-    print(f"Using device: {device}")
-    train_dir = os.path.join(args.data_root, "train")
-    valid_dir = os.path.join(args.data_root, "valid")
-    test_dir = os.path.join(args.data_root, "test")
+    log(f"Device: {device}")
 
-    imagenet_mean = [0.485, 0.456, 0.406]
-    imagenet_std = [0.229, 0.224, 0.225]
-    if args.predict is not None:
-        predict_images(
-            image_path=args.predict,
-            checkpoint_path=args.checkpoint or args.save_path,
-            batch_size=args.batch_size,
-            workers=args.workers,
-            device=device,
-            fallback_image_size=args.image_size,
-            fallback_mean=imagenet_mean,
-            fallback_std=imagenet_std,
-            dropout=args.dropout,
-        )
-        return
+    train_ds, valid_ds, test_ds, train_loader, valid_loader, test_loader = \
+        get_dataloaders(args.data_root, C.IMAGE_SIZE, args.batch_size, args.workers)
 
-    if args.stats == "dataset":
-        mean, std = compute_train_mean_std(
-            train_dir=train_dir,
-            image_size=args.image_size,
-            batch_size=args.batch_size,
-            workers=args.stats_workers,
-            seed=SEED,
-        )
-        print(f"Dataset mean: {mean}")
-        print(f"Dataset std:  {std}")
+    log(f"Classes: {train_ds.classes}")
+    log(f"Train: {len(train_ds)}  Valid: {len(valid_ds)}  Test: {len(test_ds)}")
+
+    # ── Model ────────────────────────────────────────────────────────
+    model = build_model(args.model, num_classes=len(train_ds.classes),
+                        pretrained=is_transfer, dropout=args.dropout)
+    model.to(device)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    n_train  = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("=" * 60)
+    print(f"Total Parameters: {n_params:,}")
+    print(f"Trainable Parameters: {n_train:,}")
+    print("=" * 60)
+    log(f"Model: {args.model}  |  params: {n_params:,}  |  trainable: {n_train:,}")
+
+    # ── Loss ─────────────────────────────────────────────────────────
+    if args.no_class_weights:
+        weights = None
     else:
-        mean, std = imagenet_mean, imagenet_std
-        print(f"Using ImageNet mean/std")
+        weights = compute_class_weights(train_ds, device)
+        log(f"Class weights: {weights.tolist()}")
 
-    train_tf, eval_tf = build_transforms(args.image_size, mean=mean, std=std)
-
-    train_ds = torchvision.datasets.ImageFolder(train_dir, transform=train_tf)
-    valid_ds = torchvision.datasets.ImageFolder(valid_dir, transform=eval_tf)
-    test_ds = torchvision.datasets.ImageFolder(test_dir, transform=eval_tf)
-
-    print(f"Classes: {train_ds.classes}")
-    print(f"Train samples: {len(train_ds)}")
-    print(f"Valid samples: {len(valid_ds)}")
-    print(f"Test samples: {len(test_ds)}")
-
-    generator = torch.Generator()
-    generator.manual_seed(SEED)
-    pin_memory = device.type == "cuda"
-    persistent_workers = args.workers > 0 and device.type == "cuda"
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=pin_memory,
-        worker_init_fn=seed_worker,
-        generator=generator,
-        persistent_workers=persistent_workers,
-    )
-    valid_loader = DataLoader(
-        valid_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.workers,
-        pin_memory=pin_memory,
-        worker_init_fn=seed_worker,
-        generator=generator,
-        persistent_workers=persistent_workers,
-    )
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.workers,
-        pin_memory=pin_memory,
-        worker_init_fn=seed_worker,
-        generator=generator,
-        persistent_workers=persistent_workers,
+    criterion = nn.CrossEntropyLoss(
+        weight=weights,
+        label_smoothing=C.LABEL_SMOOTH,
     )
 
-    model = SimpleCNN(num_classes=len(train_ds.classes), dropout=args.dropout).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # ── MixUp / CutMix hook (applied at batch level)
+    mixup_fn = None
+    if args.enable_mixup:
+        mixup_fn = v2.RandomChoice([
+            v2.CutMix(num_classes=len(train_ds.classes), alpha=C.CUTMIX_ALPHA),
+            v2.MixUp(num_classes=len(train_ds.classes), alpha=C.MIXUP_ALPHA),
+        ])
+        log(f"Using MixUp/CutMix (mixup_alpha={C.MIXUP_ALPHA}, cutmix_alpha={C.CUTMIX_ALPHA})")
 
+    # ── Optimizer & scheduler ────────────────────────────────────────
+    if is_transfer:
+        freeze_backbone(model)
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        optimizer = optim.AdamW(trainable, lr=lr, weight_decay=wd)
+    else:
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+
+    warmup_epochs = 3
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=max(1, epochs - warmup_epochs), T_mult=1, eta_min=1e-6)
+
+    # ── Training loop ────────────────────────────────────────────────
     best_val_acc = -1.0
-    for epoch in range(1, args.epochs + 1):
-        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, epoch=epoch)
-        val_metrics = run_epoch(model, valid_loader, criterion, None, device, epoch=epoch)
-        print(
-            f"Epoch {epoch:03d}/{args.epochs:03d} | "
-            f"train loss {train_metrics.loss:.4f} acc {train_metrics.acc:.4f} | "
-            f"val loss {val_metrics.loss:.4f} acc {val_metrics.acc:.4f}"
-        )
-        if val_metrics.acc > best_val_acc:
-            best_val_acc = val_metrics.acc
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "classes": train_ds.classes,
-                    "image_size": args.image_size,
-                    "mean": mean,
-                    "std": std,
-                    "seed": SEED,
-                },
-                args.save_path,
-            )
+    patience_counter = 0
+    t0 = time.time()
 
-    test_metrics = run_epoch(model, test_loader, criterion, None, device, epoch=None)
-    print(f"Test loss {test_metrics.loss:.4f} acc {test_metrics.acc:.4f}")
-    print(f"Best checkpoint saved to: {args.save_path}")
+    for epoch in range(1, epochs + 1):
+        # progressive unfreezing for transfer learning
+        if is_transfer and epoch == C.TL_FREEZE_EPOCHS + 1:
+            log(">>> Unfreezing full backbone")
+            unfreeze_all(model)
+            optimizer = optim.AdamW(model.parameters(),
+                                   lr=C.TL_LR_BACKBONE, weight_decay=wd)
+            scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=max(1, epochs - epoch), T_mult=1, eta_min=1e-7)
+
+        # linear warmup
+        if epoch <= warmup_epochs:
+            warmup_lr = lr * epoch / warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = warmup_lr
+
+        train_m = run_epoch(model, train_loader, criterion, optimizer,
+                    device, epoch, grad_clip=C.GRAD_CLIP, scheduler=scheduler,
+                    mixup_fn=mixup_fn)
+        val_m   = run_epoch(model, valid_loader, criterion, None,
+                            device, epoch)
+
+        elapsed = time.time() - t0
+        cur_lr = optimizer.param_groups[0]["lr"]
+        log(f"Epoch {epoch:03d}/{epochs:03d} | "
+            f"train loss {train_m.loss:.4f} acc {train_m.acc:.4f} | "
+            f"val loss {val_m.loss:.4f} acc {val_m.acc:.4f} | "
+            f"lr {cur_lr:.2e} | {elapsed:.0f}s")
+
+        if val_m.acc > best_val_acc:
+            best_val_acc = val_m.acc
+            patience_counter = 0
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "model_name": args.model,
+                "classes": train_ds.classes,
+                "image_size": C.IMAGE_SIZE,
+                "mean": C.MEAN,
+                "std": C.STD,
+                "epoch": epoch,
+                "val_acc": val_m.acc,
+                "val_loss": val_m.loss,
+            }, save_path)
+            log(f"  ★ Saved best model (val acc {best_val_acc:.4f}) → {save_path}")
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                log(f"Early stopping at epoch {epoch} (patience={args.patience})")
+                break
+
+    # ── Final test evaluation ────────────────────────────────────────
+    log("\n── Loading best checkpoint for test evaluation ──")
+    ckpt = torch.load(save_path, map_location=device, weights_only=True)
+    model_test = build_model(args.model, num_classes=len(train_ds.classes),
+                             pretrained=False, dropout=args.dropout)
+    model_test.load_state_dict(ckpt["model_state_dict"])
+    model_test.to(device)
+
+    test_m = run_epoch(model_test, test_loader, criterion, None, device)
+    log(f"\n{'='*60}")
+    log(f"  FINAL TEST  |  loss {test_m.loss:.4f}  |  acc {test_m.acc:.4f}")
+    log(f"  Best val acc: {best_val_acc:.4f}  (epoch {ckpt['epoch']})")
+    log(f"  Checkpoint: {save_path}")
+    log(f"{'='*60}")
 
 
 if __name__ == "__main__":
